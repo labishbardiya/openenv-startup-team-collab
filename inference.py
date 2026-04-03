@@ -78,9 +78,9 @@ Return ONLY valid JSON:
 """).strip()
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Structured Logging — EXACT format per spec (NO extra fields)
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# Structured Logging — strict stdout format per OpenEnv
+# ---------------------------------------------------------------------------
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
@@ -96,9 +96,9 @@ def log_end(success: bool, steps: int, rewards: List[float]) -> None:
     print(f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}", flush=True)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Visual output (stderr ONLY — never contaminates stdout)
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# CLI UI Helpers (stderr ONLY)
+# ---------------------------------------------------------------------------
 def _bar(progress: float, width: int = 10) -> str:
     filled = int(progress * width)
     return "█" * filled + "░" * (width - filled)
@@ -107,8 +107,7 @@ def _bar(progress: float, width: int = 10) -> str:
 def visual_step(obs: dict, action_str: str, reward: float) -> None:
     step = obs.get("current_step", 0)
     max_s = obs.get("max_steps", 0)
-    print(f"\n{'═' * 50}", file=sys.stderr)
-    print(f" [Step {step}/{max_s}]", file=sys.stderr)
+    print(f"\n--- Step {step}/{max_s} ---", file=sys.stderr)
     print(" 📋 Projects:", file=sys.stderr)
     for p in obs.get("projects", []):
         prog = p.get("progress", 0)
@@ -125,12 +124,12 @@ def visual_step(obs: dict, action_str: str, reward: float) -> None:
     if evts:
         print(f" ⚡ Events: {'; '.join(evts)}", file=sys.stderr)
     print(f" 🎯 Action: {action_str}  →  reward: {reward:+.2f}", file=sys.stderr)
-    print("═" * 50, file=sys.stderr)
+    print("---", file=sys.stderr)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Prompt builder
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# Prompt builder & State Serializer
+# ---------------------------------------------------------------------------
 def build_prompt(obs: dict) -> str:
     lines = [f"Step {obs.get('current_step', 0)}/{obs.get('max_steps', 0)}"]
     err = obs.get("last_action_error")
@@ -150,9 +149,9 @@ def build_prompt(obs: dict) -> str:
     return "\n".join(lines)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Action parsing — ROBUST with validation + noop fallback
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# Action parsing & Fallbacks
+# ---------------------------------------------------------------------------
 def parse_action(text: str) -> tuple[dict, Optional[str]]:
     """Parse LLM output into action dict. Returns (action_dict, error_or_None)."""
     text = text.strip()
@@ -285,9 +284,9 @@ def get_model_message(client: OpenAI, messages: list) -> str:
 
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
 # Main inference loop
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
 async def run_task(client: OpenAI, env, task_name: str) -> tuple[bool, List[float]]:
     """Run inference on one task. [END] is ALWAYS emitted via try/finally."""
     rewards: List[float] = []
@@ -394,14 +393,12 @@ async def main() -> None:
         all_results[task] = (ok, rewards)
 
     # Summary to stderr
-    print("\n" + "═" * 50, file=sys.stderr)
-    print("  📊 FINAL RESULTS", file=sys.stderr)
-    print("═" * 50, file=sys.stderr)
+    print("\n--- FINAL RESULTS ---", file=sys.stderr)
     for task, (ok, rewards) in all_results.items():
         emoji = "✅" if ok else "❌"
         total = sum(rewards)
         print(f"  {emoji} {task:20s} → steps={len(rewards)}, total_reward={total:.2f}", file=sys.stderr)
-    print("═" * 50 + "\n", file=sys.stderr)
+    print("-" * 30 + "\n", file=sys.stderr)
 
 
 if __name__ == "__main__":
