@@ -43,6 +43,15 @@ class StepRequest(BaseModel):
 
 
 # ── HTTP endpoints ────────────────────────────────────────────────────────
+@app.get("/")
+async def root():
+    return {
+        "status": "active",
+        "environment": "Team Collaboration Environment",
+        "endpoints": ["/health", "/reset", "/step", "/state", "/schema", "/grade", "/ws"]
+    }
+
+
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
