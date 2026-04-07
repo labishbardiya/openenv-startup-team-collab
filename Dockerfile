@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
@@ -10,18 +10,21 @@ RUN apt-get update && \
 # Copy dependency spec first (caching layer)
 COPY pyproject.toml .
 
-# Install Python deps
-RUN pip install --no-cache-dir -e . 2>/dev/null || pip install --no-cache-dir \
-    "openenv-core[core]>=0.2.2" \
+# Install Python deps (cannot use -e . yet since source is not copied)
+RUN pip install --no-cache-dir \
     "fastapi>=0.115.0" \
     "pydantic>=2.0.0" \
     "uvicorn>=0.24.0" \
     "requests>=2.31.0" \
     "openai>=1.0.0" \
-    "websockets>=12.0"
+    "websockets>=12.0" \
+    "httpx>=0.25.0"
 
 # Copy source
 COPY . .
+
+# Install the package itself (now source is available)
+RUN pip install --no-cache-dir -e . 2>/dev/null || true
 
 ENV PYTHONPATH="/app:$PYTHONPATH"
 ENV PYTHONUNBUFFERED=1
