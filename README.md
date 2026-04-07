@@ -1,3 +1,13 @@
+---
+title: Openenv Startup Team Collab
+emoji: 🤝
+colorFrom: blue
+colorTo: purple
+sdk: docker
+pinned: false
+app_port: 7860
+---
+
 # Team Collaboration Environment
 
 An RL OpenEnv environment simulating software team coordination under constraints. The simulation models resource management variables like burnout, discrete task dependencies, and collaborative skill mapping.
