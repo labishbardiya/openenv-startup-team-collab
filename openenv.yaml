@@ -3,4 +3,30 @@ name: team_collab_env
 type: space
 runtime: fastapi
 app: server.app:app
-port: 8000
+port: 7860
+
+description: >
+  Team Collaboration Environment — simulates startup team coordination
+  under constraints. Models burnout, task dependencies, collaboration
+  dynamics, and random disruption events.
+
+tasks:
+  - id: solo_sprint
+    name: "Solo Sprint"
+    difficulty: easy
+    description: "Manage 4 team members to complete 1 project within 15 steps."
+
+  - id: team_crunch
+    name: "Team Crunch"
+    difficulty: medium
+    description: "Complete 3 interdependent projects with random events."
+
+  - id: deadline_hell
+    name: "Deadline Hell"
+    difficulty: hard
+    description: "Complete 4 projects with tight deadlines, low energy, and cascading dependencies."
+
+models:
+  action: models.TeamCollabAction
+  observation: models.TeamCollabObservation
+  state: models.TeamCollabState

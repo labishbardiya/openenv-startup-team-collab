@@ -128,6 +128,16 @@ class TeamCollabEnv:
         r.raise_for_status()
         return r.json()
 
+    async def grade(self) -> float:
+        """Get the deterministic grader score from the environment."""
+        try:
+            r = await self._client.get("/grade")
+            r.raise_for_status()
+            data = r.json()
+            return float(data.get("score", 0.0))
+        except Exception:
+            return 0.0
+
     async def close(self) -> None:
         """Close HTTP client and stop Docker container if started."""
         await self._client.aclose()

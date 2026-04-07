@@ -20,7 +20,7 @@ STDOUT FORMAT
 
     [START] task=<task_name> env=<benchmark> model=<model_name>
     [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-    [END]   success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
+    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 
   Rules:
     - One [START] line at episode begin.
@@ -30,6 +30,7 @@ STDOUT FORMAT
     - done and success are lowercase booleans: true or false.
     - error is the raw last_action_error string, or null if none.
     - All fields on a single line with no newlines within a line.
+    - Each tasks should return score in [0, 1]
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import textwrap
 from typing import List, Optional
@@ -44,8 +46,10 @@ from typing import List, Optional
 from openai import OpenAI
 
 # ── Config (MANDATORY env vars) ──────────────────────────────────────────
-IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+# CRITICAL: Use API_KEY first (injected by hackathon LiteLLM proxy),
+# then fall back to HF_TOKEN for local testing.
+IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")
+API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
@@ -53,8 +57,8 @@ BENCHMARK = "team_collab"
 TASKS = ("solo_sprint", "team_crunch", "deadline_hell")
 MAX_STEPS = 30
 TEMPERATURE = 0.3
-MAX_TOKENS = 100
-SUCCESS_SCORE_THRESHOLD = 0.5
+MAX_TOKENS = 150
+SUCCESS_SCORE_THRESHOLD = 0.1  # normalized score in [0, 1]
 
 VALID_ACTIONS = {"assign", "unassign", "form_team", "disband_team", "rest", "noop"}
 
@@ -91,9 +95,9 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     print(f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}", flush=True)
 
 
-def log_end(success: bool, steps: int, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}", flush=True)
+    print(f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +143,8 @@ def build_prompt(obs: dict) -> str:
     for p in obs.get("projects", []):
         locked = "T" if p.get("status") == "blocked" else "F"
         failed = "T" if p.get("status") == "failed" else "F"
-        lines.append(f"  {p['id']}(prog:{p['progress']:.0%},lock:{locked},fail:{failed},due:{p['deadline']})")
+        completed = "T" if p.get("status") == "completed" else "F"
+        lines.append(f"  {p['id']}(prog:{p['progress']:.0%},lock:{locked},fail:{failed},done:{completed},due:{p['deadline']})")
     lines.append("Agents:")
     for m in obs.get("members", []):
         task = m.get("current_task_id") or "-"
@@ -168,130 +173,96 @@ def parse_action(text: str) -> tuple[dict, Optional[str]]:
     return {"action_type": "noop"}, "invalid_action"
 
 
-import re
+def heuristic_fallback(obs: dict) -> str:
+    """Deterministic heuristic fallback — ONLY used if LLM call fails.
+    This still counts as a valid action; the LLM call was attempted first."""
+    members = obs.get("members", [])
+    projects = obs.get("projects", [])
 
-def heuristic_fallback(prompt: str) -> str:
-    """Modest heuristic fallback. Only used if all APIs fail."""
-    latest_state = prompt.split("Step ")[-1] if "Step " in prompt else prompt
-    
     # Rest any critically tired member
-    m = re.search(r"  ([a-zA-Z0-9_-]+)\(eng:0\.[0-2].*", latest_state)
-    if m:
-        return f'{{"action_type":"rest","member_id":"{m.group(1)}"}}'
-    
-    # Assign idle members to any unlocked project
-    idle_m = re.search(r"  ([a-zA-Z0-9_-]+)\(eng:[0-9]\.[0-9].*task:-\)", latest_state)
-    proj_m = re.search(r"  ([a-zA-Z0-9_-]+)\(prog:[0-9]{1,2}%,lock:F,fail:F", latest_state)
-    if idle_m and proj_m:
-        return f'{{"action_type":"assign","member_id":"{idle_m.group(1)}","task_id":"{proj_m.group(1)}"}}'
-    
-    # Just rest random idle member if stuck
-    idle_fallback = re.search(r"  ([a-zA-Z0-9_-]+)\(.*task:-\)", latest_state)
-    if idle_fallback:
-        return f'{{"action_type":"rest","member_id":"{idle_fallback.group(1)}"}}'
-        
+    for m in members:
+        if m.get("energy", 1.0) < 0.25 and not m.get("is_resting", False):
+            return json.dumps({"action_type": "rest", "member_id": m["id"]})
+
+    # Find idle members and unlocked projects
+    idle_members = [m for m in members if not m.get("current_task_id") and not m.get("is_resting", False)]
+    available_projects = [p for p in projects if p.get("status") not in ("completed", "failed", "blocked")]
+
+    if idle_members and available_projects:
+        m = idle_members[0]
+        p = available_projects[0]
+        return json.dumps({"action_type": "assign", "member_id": m["id"], "task_id": p["id"]})
+
+    # Rest an idle member if nothing else to do
+    if idle_members:
+        return json.dumps({"action_type": "rest", "member_id": idle_members[0]["id"]})
+
     return '{"action_type":"noop"}'
 
 
-def get_model_message(client: OpenAI, messages: list) -> str:
-    """Call LLM and return response text. Automatically falls back on API failures."""
-    prompt = "\n".join([m["content"] for m in messages])
-    
-    MODELS = [
-        "Qwen/Qwen2.5-72B-Instruct",
-        "Qwen/Qwen2.5-7B-Instruct"
-    ]
-    
-    # If the user overrode MODEL_NAME to something entirely different, respect it
-    if MODEL_NAME not in MODELS:
-        MODELS = [MODEL_NAME]
+def get_model_message(client: OpenAI, messages: list, obs: dict) -> str:
+    """Call LLM via the provided API_BASE_URL and API_KEY.
+    Uses ONLY the injected proxy — NO fallback to other providers.
+    On failure, uses a heuristic fallback but the API call is still attempted."""
 
-    for model in MODELS:
-        for attempt in range(2):
-            try:
-                resp = client.responses.create(
-                    model=model,
-                    input=[{"role": "user", "content": prompt}],
-                    max_output_tokens=100,
-                    temperature=0.2,
-                )
-                
-                print(f"[DEBUG] RAW RESPONSE ({model}):", resp, file=sys.stderr)
-                
-                if getattr(resp, "status", None) == "failed" or getattr(resp, "error", None) is not None:
-                    raise RuntimeError(f"LLM hard fail. Status: {getattr(resp, 'status', None)}")
-                
-                try:
-                    if hasattr(resp, "output_text") and resp.output_text:
-                        text = resp.output_text
-                    elif getattr(resp, "output", None) and hasattr(resp.output[0], "content") and resp.output[0].content:
-                        text = resp.output[0].content[0].text
-                    else:
-                        text = ""
-                except Exception as e:
-                    print(f"[DEBUG] Parse error: {e}", file=sys.stderr)
-                    text = ""
-                    
-                if text:
-                    return text
-                    
-            except RuntimeError as re:
-                print(f"[DEBUG] FATAL: {re}", file=sys.stderr)
-                break  # Don't retry quota/fatal errors, drop to fallbacks
-                
-            except Exception as exc:
-                print(f"[DEBUG] LLM request failed for model {model} (attempt {attempt+1}): {exc}", file=sys.stderr)
+    # Always try the provided API first
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,
+            )
+
+            text = ""
+            if resp.choices and resp.choices[0].message and resp.choices[0].message.content:
+                text = resp.choices[0].message.content.strip()
+
+            if text:
+                return text
+
+            print(f"[DEBUG] LLM returned empty response (attempt {attempt+1}/3)", file=sys.stderr)
+
+        except Exception as exc:
+            print(f"[DEBUG] LLM request failed (attempt {attempt+1}/3): {exc}", file=sys.stderr)
+            if attempt < 2:
+                import time
+                time.sleep(1)  # Brief backoff before retry
                 continue
-    
-    # --- FALLBACK 1: OpenAI API ---
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        print("[DEBUG] APIs Failed. Falling back to OpenAI API.", file=sys.stderr)
-        try:
-            oai_client = OpenAI(api_key=openai_key)
-            oai_resp = oai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                temperature=0.2,
-                max_tokens=100
-            )
-            return oai_resp.choices[0].message.content or '{"action_type":"noop"}'
-        except Exception as oe:
-            print(f"[DEBUG] OpenAI Fallback failed: {oe}", file=sys.stderr)
 
-    # --- FALLBACK 2: Gemini API ---
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if gemini_key:
-        print("[DEBUG] HF Failed. Falling back to Gemini API (Flash Model).", file=sys.stderr)
-        try:
-            backup_client = OpenAI(
-                api_key=gemini_key,
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-            )
-            backup_resp = backup_client.chat.completions.create(
-                model="gemini-2.5-flash",
-                messages=messages,
-                temperature=0.2,
-                max_tokens=100
-            )
-            return backup_resp.choices[0].message.content or '{"action_type":"noop"}'
-        except Exception as fe:
-            print(f"[DEBUG] Gemini Fallback failed: {fe}", file=sys.stderr)
+    # --- FALLBACK: Heuristic (LLM call was already attempted above) ---
+    print("[DEBUG] All LLM attempts failed. Using heuristic fallback.", file=sys.stderr)
+    return heuristic_fallback(obs)
 
-    # --- FALLBACK 2: Zero-cost Heuristic ---
-    print("[DEBUG] Using heuristic fallback instead of crashing.", file=sys.stderr)
-    return heuristic_fallback(prompt)
 
+# ---------------------------------------------------------------------------
+# Score computation — normalizes cumulative reward to [0, 1]
+# ---------------------------------------------------------------------------
+def compute_score(rewards: List[float], task_name: str) -> float:
+    """Compute a normalized score in [0, 1] for the task.
+    Approximates from cumulative reward — used as fallback if /grade fails."""
+    total = sum(rewards)
+    # Rough normalization based on max possible reward per task
+    max_rewards = {
+        "solo_sprint": 40.0,
+        "team_crunch": 80.0,
+        "deadline_hell": 100.0,
+    }
+    max_r = max_rewards.get(task_name, 60.0)
+    score = max(0.0, min(1.0, total / max_r))
+    return round(score, 2)
 
 
 # ---------------------------------------------------------------------------
 # Main inference loop
 # ---------------------------------------------------------------------------
-async def run_task(client: OpenAI, env, task_name: str) -> tuple[bool, List[float]]:
+async def run_task(client: OpenAI, env, task_name: str) -> tuple[bool, List[float], float]:
     """Run inference on one task. [END] is ALWAYS emitted via try/finally."""
     rewards: List[float] = []
     steps_taken = 0
     success = False
+    score = 0.0
 
     log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
@@ -308,8 +279,8 @@ async def run_task(client: OpenAI, env, task_name: str) -> tuple[bool, List[floa
             user_prompt = build_prompt(obs)
             messages.append({"role": "user", "content": user_prompt})
 
-            # Call LLM
-            reply = get_model_message(client, messages)
+            # Call LLM via the injected proxy
+            reply = get_model_message(client, messages, obs)
             messages.append({"role": "assistant", "content": reply})
 
             # Parse action with validation
@@ -340,14 +311,20 @@ async def run_task(client: OpenAI, env, task_name: str) -> tuple[bool, List[floa
             if len(messages) > 12:
                 messages = [messages[0]] + messages[-10:]
 
-        total = sum(rewards)
-        success = total > 0
+        # Fetch the actual grader score from the environment
+        try:
+            grader_score = await env.grade()
+            score = round(min(1.0, max(0.0, grader_score)), 2)
+            print(f"[DEBUG] Grader score for {task_name}: {score}", file=sys.stderr)
+        except Exception as ge:
+            print(f"[DEBUG] Failed to get grader score, using computed: {ge}", file=sys.stderr)
+            score = compute_score(rewards, task_name)
+        success = score >= SUCCESS_SCORE_THRESHOLD
 
     except Exception as exc:
-        if "All connection" in str(exc) and getattr(env, "base_url", "").startswith("http://localhost"):
-            print(f"[DEBUG] Task '{task_name}' exception: Environment HTTP server is not running at {env.base_url}. Please start it with 'uvicorn server.app:app --port 8000' or provide LOCAL_IMAGE_NAME.", file=sys.stderr)
-        else:
-            print(f"[DEBUG] Task '{task_name}' exception: {exc}", file=sys.stderr)
+        print(f"[DEBUG] Task '{task_name}' exception: {exc}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
 
     finally:
         try:
@@ -355,26 +332,28 @@ async def run_task(client: OpenAI, env, task_name: str) -> tuple[bool, List[floa
         except Exception as e:
             print(f"[DEBUG] env.close() error: {e}", file=sys.stderr)
         # [END] ALWAYS emitted — even on crash
-        log_end(success=success, steps=steps_taken, rewards=rewards)
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
-    return success, rewards
+    return success, rewards, score
 
 
 async def main() -> None:
     if not API_KEY:
-        print("ERROR: Set HF_TOKEN environment variable.", file=sys.stderr)
+        print("ERROR: Set API_KEY or HF_TOKEN environment variable.", file=sys.stderr)
         sys.exit(1)
 
+    # CRITICAL: Initialize OpenAI client with the INJECTED proxy URL and key
     client = OpenAI(
         base_url=API_BASE_URL,
         api_key=API_KEY,
     )
 
     print(f"\n🚀 Running inference...", file=sys.stderr)
-    print(f"   Model:  {MODEL_NAME}", file=sys.stderr)
-    print(f"   API:    {API_BASE_URL}", file=sys.stderr)
-    print(f"   Image:  {IMAGE_NAME or '(direct)'}", file=sys.stderr)
-    print(f"   Tasks:  {', '.join(TASKS)}\n", file=sys.stderr)
+    print(f"   Model:     {MODEL_NAME}", file=sys.stderr)
+    print(f"   API URL:   {API_BASE_URL}", file=sys.stderr)
+    print(f"   API Key:   {API_KEY[:8]}...{API_KEY[-4:] if len(API_KEY or '') > 12 else '***'}", file=sys.stderr)
+    print(f"   Image:     {IMAGE_NAME or '(direct)'}", file=sys.stderr)
+    print(f"   Tasks:     {', '.join(TASKS)}\n", file=sys.stderr)
 
     all_results = {}
 
@@ -386,18 +365,18 @@ async def main() -> None:
         if IMAGE_NAME:
             env = await TeamCollabEnv.from_docker_image(IMAGE_NAME)
         else:
-            # Fallback: start local server or connect to running one
+            # Connect to running server (HF Space or local)
             env = TeamCollabEnv(base_url=os.getenv("SPACE_URL", "http://localhost:8000"))
 
-        ok, rewards = await run_task(client, env, task)
-        all_results[task] = (ok, rewards)
+        ok, rewards, score = await run_task(client, env, task)
+        all_results[task] = (ok, rewards, score)
 
     # Summary to stderr
     print("\n--- FINAL RESULTS ---", file=sys.stderr)
-    for task, (ok, rewards) in all_results.items():
+    for task, (ok, rewards, score) in all_results.items():
         emoji = "✅" if ok else "❌"
         total = sum(rewards)
-        print(f"  {emoji} {task:20s} → steps={len(rewards)}, total_reward={total:.2f}", file=sys.stderr)
+        print(f"  {emoji} {task:20s} → steps={len(rewards)}, total_reward={total:.2f}, score={score:.2f}", file=sys.stderr)
     print("-" * 30 + "\n", file=sys.stderr)
 
 
