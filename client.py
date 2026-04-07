@@ -55,7 +55,7 @@ class TeamCollabEnv:
         print(f"[DEBUG] Starting container {image_name} on port {port}...", file=sys.stderr)
 
         container_id = subprocess.check_output(
-            ["docker", "run", "-d", "-p", f"{port}:8000", image_name],
+            ["docker", "run", "-d", "-p", f"{port}:7860", image_name],
             stderr=subprocess.STDOUT,
         ).decode().strip()
 

@@ -327,10 +327,6 @@ async def run_task(client: OpenAI, env, task_name: str) -> tuple[bool, List[floa
         traceback.print_exc(file=sys.stderr)
 
     finally:
-        try:
-            await env.close()
-        except Exception as e:
-            print(f"[DEBUG] env.close() error: {e}", file=sys.stderr)
         # [END] ALWAYS emitted — even on crash
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
@@ -357,19 +353,40 @@ async def main() -> None:
 
     all_results = {}
 
-    for task in TASKS:
-        # Create env for each task (fresh container or connection)
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from client import TeamCollabEnv
+    # Create env ONCE and reuse across all tasks
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from client import TeamCollabEnv
 
+    env = None
+    try:
         if IMAGE_NAME:
             env = await TeamCollabEnv.from_docker_image(IMAGE_NAME)
+            print(f"[DEBUG] Container started successfully", file=sys.stderr)
         else:
             # Connect to running server (HF Space or local)
-            env = TeamCollabEnv(base_url=os.getenv("SPACE_URL", "http://localhost:8000"))
+            env = TeamCollabEnv(base_url=os.getenv("SPACE_URL", "http://localhost:7860"))
+            print(f"[DEBUG] Connected to {env.base_url}", file=sys.stderr)
+    except Exception as e:
+        print(f"[DEBUG] FATAL: Failed to create environment: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        # Emit [END] for all tasks so validator sees structured output
+        for task in TASKS:
+            log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
+            log_end(success=False, steps=0, score=0.0, rewards=[])
+        sys.exit(1)
 
+    for task in TASKS:
         ok, rewards, score = await run_task(client, env, task)
         all_results[task] = (ok, rewards, score)
+
+        # Re-reset for next task (env persists across tasks)
+
+    # Cleanup the container at the end
+    try:
+        await env.close()
+    except Exception as e:
+        print(f"[DEBUG] Final env.close() error: {e}", file=sys.stderr)
 
     # Summary to stderr
     print("\n--- FINAL RESULTS ---", file=sys.stderr)
