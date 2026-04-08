@@ -250,8 +250,8 @@ def compute_score(rewards: List[float], task_name: str) -> float:
         "deadline_hell": 100.0,
     }
     max_r = max_rewards.get(task_name, 60.0)
-    score = max(0.0, min(1.0, total / max_r))
-    return round(score, 2)
+    score = max(0.0001, min(0.9999, total / max_r))
+    return round(score, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +314,7 @@ async def run_task(client: OpenAI, env, task_name: str) -> tuple[bool, List[floa
         # Fetch the actual grader score from the environment
         try:
             grader_score = await env.grade()
-            score = round(min(1.0, max(0.0, grader_score)), 2)
+            score = max(0.0001, min(0.9999, round(grader_score, 4)))
             print(f"[DEBUG] Grader score for {task_name}: {score}", file=sys.stderr)
         except Exception as ge:
             print(f"[DEBUG] Failed to get grader score, using computed: {ge}", file=sys.stderr)
