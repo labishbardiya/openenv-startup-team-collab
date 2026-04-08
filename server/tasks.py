@@ -57,7 +57,8 @@ def _solo_sprint_config() -> dict:
 
 def grade_solo_sprint(sim: Simulation) -> float:
     p = sim.get_project("p1")
-    return round(min(1.0, p.progress), 4) if p else 0.0
+    score = p.progress if p else 0.0
+    return max(0.0001, min(0.9999, round(score, 4)))
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +120,7 @@ def grade_team_crunch(sim: Simulation) -> float:
     completed = sim.completed_count
     avg_progress = sum(p.progress for p in sim.projects) / max(total, 1)
     score = (completed / total) * 0.7 + avg_progress * 0.3
-    return round(min(1.0, score), 4)
+    return max(0.0001, min(0.9999, round(score, 4)))
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +193,7 @@ def grade_deadline_hell(sim: Simulation) -> float:
     )
     energy_mgmt = 1.0 - min(1.0, burnout_rate)
     score = completion_rate * 0.5 + avg_progress * 0.25 + energy_mgmt * 0.25
-    return round(min(1.0, score), 4)
+    return max(0.0001, min(0.9999, round(score, 4)))
 
 
 # ---------------------------------------------------------------------------
