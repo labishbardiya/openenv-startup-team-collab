@@ -250,8 +250,8 @@ def compute_score(rewards: List[float], task_name: str) -> float:
         "deadline_hell": 100.0,
     }
     max_r = max_rewards.get(task_name, 60.0)
-    score = max(0.0001, min(0.9999, total / max_r))
-    return round(score, 4)
+    score = max(0.01, min(0.99, total / max_r))
+    return round(score, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +262,7 @@ async def run_task(client: OpenAI, env, task_name: str) -> tuple[bool, List[floa
     rewards: List[float] = []
     steps_taken = 0
     success = False
-    score = 0.0
+    score = 0.01
 
     log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
@@ -314,7 +314,7 @@ async def run_task(client: OpenAI, env, task_name: str) -> tuple[bool, List[floa
         # Fetch the actual grader score from the environment
         try:
             grader_score = await env.grade()
-            score = max(0.0001, min(0.9999, round(grader_score, 4)))
+            score = max(0.01, min(0.99, round(grader_score, 2)))
             print(f"[DEBUG] Grader score for {task_name}: {score}", file=sys.stderr)
         except Exception as ge:
             print(f"[DEBUG] Failed to get grader score, using computed: {ge}", file=sys.stderr)
@@ -373,7 +373,7 @@ async def main() -> None:
         # Emit [END] for all tasks so validator sees structured output
         for task in TASKS:
             log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
-            log_end(success=False, steps=0, score=0.0, rewards=[])
+            log_end(success=False, steps=0, score=0.01, rewards=[])
         sys.exit(1)
 
     for task in TASKS:
